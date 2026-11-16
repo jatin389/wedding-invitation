@@ -1,0 +1,8 @@
+# raw renders, PNG masters and seam frames stay local; the site ships the encoded clips
+work/*.png
+work/*.mp4
+work/start/
+work/seam/
+work/.imported
+.serve/
+.DS_Store
