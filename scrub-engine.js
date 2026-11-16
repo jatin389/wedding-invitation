@@ -68,7 +68,10 @@ function mountLetsScroll(container, config) {
   // Phone detection. `coarse` is captured once (input type doesn't change mid-session);
   // the ≤860px query is read live via isMobile() so a desktop resize/DevTools toggle
   // switches sources and seek behaviour without a reload.
-  const coarse = window.matchMedia('(hover: none) and (pointer: coarse)').matches;
+  const coarse = window.matchMedia('(hover: none) and (pointer: coarse)').matches
+    || window.matchMedia('(any-pointer: coarse)').matches
+    || (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0)
+    || (typeof navigator !== 'undefined' && /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent));
   const smallMQ = window.matchMedia('(max-width: 860px)');
   const isMobile = () => coarse || smallMQ.matches;
   const SECTIONS = config.sections || [];
@@ -86,18 +89,17 @@ function mountLetsScroll(container, config) {
   // ---- build the interleaved segment chain: dive0, conn0, dive1, … diveN-1 ----
   const SEGMENTS = [];
   SECTIONS.forEach((s, i) => {
-    const dive = { kind: 'dive', si: i, clip: s.clip, clipM: s.clipMobile, still: s.still, stillM: s.stillMobile,
+    const clip = s.clip || s.clipMobile;
+    const still = s.still || s.stillMobile;
+    const dive = { kind: 'dive', si: i, clip: clip, clipM: s.clipMobile, still: still, stillM: s.stillMobile,
                    accent: s.accent, w: s.scroll || DIVE_W, linger: s.linger || 0 };
     SEGMENTS.push(dive);
     s._seg = dive;
-    // A connector is optional: if connectors[i] is falsy, the two dives simply
-    // crossfade directly (no fly-over). Lets a page complete even when a
-    // connector can't be generated (e.g. a content-filter false-positive).
-    // A mobile-only connector (no desktop one yet) is used on phones only.
-    const connClip = CONNECTORS[i] || (isMobile() && CONNECTORS_M[i]);
+
+    const connClip = CONNECTORS[i] || CONNECTORS_M[i];
     if (i < N - 1 && connClip) {
       SEGMENTS.push({ kind: 'conn', si: i, clip: connClip, clipM: CONNECTORS_M[i],
-                      still: SECTIONS[i + 1].still, stillM: SECTIONS[i + 1].stillMobile,
+                      still: SECTIONS[i + 1].still || SECTIONS[i + 1].stillMobile,
                       accent: SECTIONS[i + 1].accent, w: CONN_W });
     }
   });
@@ -109,7 +111,6 @@ function mountLetsScroll(container, config) {
     sky.appendChild(el('div', 'sw-sky__grad'));
     sky.appendChild(el('div', 'sw-sky__glow'));
   }
-  const particles = el('div', 'sw-particles'); sky.appendChild(particles);
 
   const scrollbar = el('div', 'sw-scrollbar');
   const scrollbarFill = el('span'); scrollbar.appendChild(scrollbarFill);
@@ -141,7 +142,7 @@ function mountLetsScroll(container, config) {
   SEGMENTS.forEach(s => {
     const scene = el('div', 'sw-scene'); scene.style.setProperty('--sw-accent', s.accent || '');
     const img = el('img', 'sw-scene__still'); img.alt = ''; img.decoding = 'async'; img.loading = 'lazy';
-    const poster = (isMobile() && s.stillM) ? s.stillM : s.still;
+    const poster = s.still || s.stillM;
     if (poster) img.src = poster;
     scene.appendChild(img); stage.appendChild(scene);
     s.el = scene; s.img = img; s.video = null; s.hasClip = false;
@@ -197,15 +198,93 @@ function mountLetsScroll(container, config) {
     window.scrollTo({ top: seg.start + (seg.end - seg.start) * 0.5, behavior: reduce ? 'auto' : 'smooth' });
   }
 
+  // ---- background preloader ----
+  // Every clip is downloaded one at a time, in scroll order, starting the moment the
+  // page opens. The queue always picks the first unloaded clip at or after where the
+  // visitor is, so scrolling ahead (or tapping a route dot) moves that clip to the
+  // front. One download at a time gives the clip that's needed next the whole
+  // connection instead of splitting it eleven ways.
+  // Under prefers-reduced-motion, or on Save-Data / 2G, nothing is fetched up front:
+  // the stills cross-dissolve, and a tap on the loader pill opts in to the animations.
+  const conn = navigator.connection || {};
+  let lowData = !!(conn.saveData || /(^|-)2g$/.test(conn.effectiveType || ''));
+  const urlOf = s => s.clip || s.clipM;
+  const QUEUE = SEGMENTS.filter(s => urlOf(s));
+  let inflight = null, curSeg = 0;
+
+  function nextToLoad() {
+    const ok = s => urlOf(s) && !s.loaded && !s.failed;
+    for (let i = curSeg; i < NSEG; i++) if (ok(SEGMENTS[i])) return SEGMENTS[i];
+    for (let i = curSeg - 1; i >= 0; i--) if (ok(SEGMENTS[i])) return SEGMENTS[i];
+    return null;
+  }
+  function pump() {
+    if (inflight || reduce || lowData) return;
+    const s = nextToLoad();
+    if (!s) { progress(); return; }
+    inflight = s;
+    loadClip(s).then(() => { inflight = null; pump(); });
+  }
+  // If the visitor jumps far ahead while an unrelated clip is downloading, drop that
+  // download so the clip they're looking at starts now (it is re-queued for later).
+  function reprioritise() {
+    if (!inflight) return pump();
+    const want = nextToLoad();
+    const i = SEGMENTS.indexOf(inflight);
+    if (want && want !== inflight && (i < curSeg || i > curSeg + 1) && inflight.abort) inflight.abort.abort();
+  }
+
+  // Loader pill: shows overall progress, then fades away once everything is ready.
+  const pill = el('button', 'sw-load');
+  pill.type = 'button';
+  pill.innerHTML = '<i></i><span></span>';
+  container.appendChild(pill);
+  const pillText = pill.querySelector('span'), pillBar = pill.querySelector('i');
+  pill.addEventListener('click', () => { if (lowData) { lowData = false; pill.classList.remove('is-optin'); pump(); progress(); } });
+  function progress() {
+    if (reduce || !QUEUE.length) { pill.hidden = true; return; }
+    if (lowData) {
+      pill.classList.add('is-optin');
+      pillText.textContent = config.lowDataText || 'Tap to load the animations';
+      return;
+    }
+    let done = 0;
+    QUEUE.forEach(s => { done += s.loaded || s.failed ? 1 : (s.size ? Math.min(1, s.got / s.size) : 0); });
+    const pct = Math.round(100 * done / QUEUE.length);
+    pillBar.style.setProperty('--p', pct + '%');
+    pillText.textContent = (config.loadingText || 'Preparing the celebrations') + ' · ' + pct + '%';
+    pill.classList.toggle('is-done', pct >= 100);
+  }
+
   function loadClip(s) {
-    // Under prefers-reduced-motion we never load the clips at all — the stills stay up
-    // and simply cross-dissolve as you scroll. No scrubbed video motion, no decode cost.
-    if (reduce || s.loading || !s.clip) return;
     s.loading = true;
-    // Serve the lighter mobile encode on phones when one was provided.
-    const url = (isMobile() && s.clipM) ? s.clipM : s.clip;
-    fetch(url).then(r => r.ok ? r.blob() : Promise.reject(new Error('404')))
-      .then(blob => {
+    const url = urlOf(s);
+    const ac = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    s.abort = ac;
+    return fetch(url, ac ? { signal: ac.signal } : undefined)
+      .then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const total = +r.headers.get('content-length') || 0;
+        if (!r.body || !r.body.getReader || !total) return r.blob();
+        // Stream it so the loader can show progress within a clip on slow connections.
+        s.size = total; s.got = 0;
+        const reader = r.body.getReader(), chunks = [];
+        const step = () => reader.read().then(({ done, value }) => {
+          if (done) return new Blob(chunks, { type: r.headers.get('content-type') || 'video/mp4' });
+          chunks.push(value); s.got += value.length; progress();
+          return step();
+        });
+        return step();
+      })
+      .then(blob => { s.loaded = true; s.abort = null; attachVideo(s, blob); progress(); })
+      .catch(err => {
+        s.loading = false; s.abort = null; s.got = 0;
+        if (!(err && err.name === 'AbortError')) { s.tries = (s.tries || 0) + 1; if (s.tries >= 3) s.failed = true; }
+        progress();
+      });
+  }
+
+  function attachVideo(s, blob) {
         const v = document.createElement('video');
         v.className = 'sw-scene__video';
         v.muted = true; v.playsInline = true; v.preload = 'auto';
@@ -218,7 +297,6 @@ function mountLetsScroll(container, config) {
         v.addEventListener('seeked', () => { s.el.classList.add('has-clip'); }, { once: true });
         v.addEventListener('loadeddata', () => { try { v.pause(); } catch (e) {} if (userReady) primeVideo(v); });
         s.el.appendChild(v); s.video = v; s.hasClip = true;
-      }).catch(() => { s.loading = false; });
   }
 
   function read() {
@@ -226,10 +304,10 @@ function mountLetsScroll(container, config) {
     const fade = CROSSFADE * vh;
     let ci = 0;
     for (let i = 0; i < NSEG; i++) if (y >= SEGMENTS[i].start) ci = i;
+    if (ci !== curSeg) { curSeg = ci; reprioritise(); }
 
     for (let i = 0; i < NSEG; i++) {
       const s = SEGMENTS[i];
-      if (y > s.start - 1.6 * vh && y < s.end + 1.6 * vh) loadClip(s);
       const local = clamp((y - s.start) / (s.end - s.start), 0, 1);
       s.target = s.linger ? lingerEase(local, s.linger) : local;
       let outside = 0;
@@ -239,7 +317,7 @@ function mountLetsScroll(container, config) {
       s.el.style.zIndex = (i === ci) ? '120' : String(100 + Math.round(op * 10));
       if (!s.hasClip || !s.ready) {
         const sc = reduce ? 1 : 1.03 + local * 0.14;
-        s.img.style.transform = `translateX(${stageX - 2}vw) scale(${sc.toFixed(3)})`;
+        s.img.style.transform = `scale(${sc.toFixed(3)})`;
       }
     }
 
@@ -253,7 +331,7 @@ function mountLetsScroll(container, config) {
       else cop = (before || after) ? 0 : smooth(1 - Math.abs(pr - 0.5) / 0.5);
       const c = copies[i];
       c.style.opacity = cop;
-      c.style.transform = reduce ? 'none' : `translateY(${(0.5 - pr) * 4}vh)`;
+      c.style.transform = reduce ? 'translateX(-50%)' : `translateX(-50%) translateY(${(0.5 - pr) * 2.5}vh)`;
       c.style.pointerEvents = cop > 0.5 ? 'auto' : 'none';
     }
 
@@ -268,7 +346,6 @@ function mountLetsScroll(container, config) {
     }
     scrollbarFill.style.transform = `scaleX(${clamp(y / (totalW * vh))})`;
     hint.style.opacity = clamp(1 - y / (0.5 * vh));
-    if (particles) particles.style.transform = `translate3d(0, ${-y * 0.05}px, 0)`;
     ticking = false;
   }
 
@@ -296,7 +373,7 @@ function mountLetsScroll(container, config) {
   // clips prime themselves (see loadClip).
   let userReady = false;
   function primeVideo(v) {
-    if (!isMobile() || !v) return;
+    if (!v) return;
     try { const p = v.play(); if (p && p.then) p.then(() => { try { v.pause(); } catch (e) {} }).catch(() => {}); }
     catch (e) {}
   }
@@ -308,8 +385,6 @@ function mountLetsScroll(container, config) {
   window.addEventListener('pointerdown', onFirstGesture, { once: true, passive: true });
   window.addEventListener('touchstart', onFirstGesture, { once: true, passive: true });
 
-  // Particles are a per-frame cost we can't afford alongside video scrubbing on a phone.
-  seedParticles(particles, reduce || coarse);
   window.addEventListener('scroll', () => { if (!ticking) { ticking = true; requestAnimationFrame(read); } }, { passive: true });
   // Mobile browsers fire `resize` every time the URL bar slides in/out. Re-running
   // layout() there rebuilds the track height and yanks the scroll position, so on
@@ -325,6 +400,8 @@ function mountLetsScroll(container, config) {
   window.addEventListener('load', layout);
   layout();
   requestAnimationFrame(raf);
+  progress();
+  pump();
 
   // ---- helpers ----
   function el(tag, cls) { const n = document.createElement(tag); if (cls) n.className = cls; return n; }
@@ -335,23 +412,6 @@ function mountLetsScroll(container, config) {
     if (cta.primary) h += `<a class="sw-btn sw-btn--primary" href="${esc(cta.primary.href || '#')}">${esc(cta.primary.label)}</a>`;
     if (cta.secondary) h += `<a class="sw-btn sw-btn--ghost" href="${esc(cta.secondary.href || '#')}">${esc(cta.secondary.label)}</a>`;
     return h;
-  }
-}
-
-function seedParticles(host, reduce) {
-  if (!host || reduce) return;
-  const kinds = ['dot', 'dot', 'ring'];
-  const seeds = [7, 23, 41, 58, 71, 88, 12, 34, 52, 66, 83, 95, 18, 29, 47, 63, 77, 91, 5, 38, 55, 69, 82, 97];
-  for (let k = 0; k < 20; k++) {
-    const s = document.createElement('span');
-    s.className = 'sw-pt sw-pt--' + kinds[k % kinds.length];
-    s.style.left = seeds[k % seeds.length] + 'vw';
-    s.style.top = ((seeds[(k * 3) % seeds.length] * 1.3) % 100) + 'vh';
-    s.style.setProperty('--sw-sc', (0.5 + ((seeds[(k * 5) % seeds.length] % 60) / 60) * 1.1).toFixed(2));
-    const dur = 14 + (seeds[(k * 7) % seeds.length] % 22);
-    s.style.animationDuration = dur + 's';
-    s.style.animationDelay = (-(seeds[(k * 2) % seeds.length] % dur)) + 's';
-    host.appendChild(s);
   }
 }
 
@@ -366,76 +426,68 @@ function injectCSS() {
   .sw-sky{position:fixed;inset:0;z-index:0;overflow:hidden;pointer-events:none;background:var(--sw-bg);}
   .sw-sky__grad{position:absolute;inset:-10%;background:linear-gradient(178deg,color-mix(in srgb,var(--sw-accent) 12%,var(--sw-bg)) 0%,var(--sw-bg) 55%,color-mix(in srgb,var(--sw-accent) 6%,var(--sw-bg)) 100%);}
   .sw-sky__glow{position:absolute;inset:0;background:radial-gradient(60% 42% at 74% 16%,color-mix(in srgb,var(--sw-accent) 22%,transparent),transparent 70%),radial-gradient(46% 34% at 50% 50%,color-mix(in srgb,#fff 45%,transparent),transparent 70%);}
-  .sw-particles{position:absolute;inset:-6% -2%;will-change:transform;}
-  .sw-pt{position:absolute;width:13px;height:13px;transform:scale(var(--sw-sc,1));opacity:0;animation:sw-drift linear infinite;}
-  .sw-pt::before{content:"";position:absolute;inset:0;border-radius:50%;}
-  .sw-pt--dot::before{background:radial-gradient(circle at 34% 30%,color-mix(in srgb,var(--sw-accent) 60%,#000),#000 82%);}
-  .sw-pt--ring::before{background:transparent;border:2px solid color-mix(in srgb,var(--sw-accent) 55%,transparent);}
-  @keyframes sw-drift{0%{opacity:0;transform:scale(var(--sw-sc)) translate(0,12vh) rotate(0)}12%{opacity:.5}88%{opacity:.45}100%{opacity:0;transform:scale(var(--sw-sc)) translate(4vw,-22vh) rotate(210deg)}}
+
   .sw-scrollbar{position:fixed;top:0;left:0;right:0;height:3px;z-index:60;background:color-mix(in srgb,var(--sw-accent) 14%,transparent);}
   .sw-scrollbar span{display:block;height:100%;width:100%;transform-origin:0 50%;transform:scaleX(0);background:var(--sw-accent);}
-  .sw-topbar{position:fixed;top:0;left:0;right:0;z-index:50;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:clamp(14px,2.4vw,26px) clamp(18px,5vw,64px);}
+
+  .sw-topbar{position:fixed;top:0;left:50%;transform:translateX(-50%);width:min(calc(100vw - 32px),500px);box-sizing:border-box;z-index:50;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:clamp(12px,2.4vh,22px) 0;}
   .sw-brand{display:flex;align-items:center;gap:10px;text-decoration:none;color:var(--sw-ink);}
-  .sw-brand__mark{width:24px;height:28px;border-radius:7px 7px 10px 10px;background:linear-gradient(160deg,var(--sw-accent),color-mix(in srgb,var(--sw-accent) 60%,#000));box-shadow:0 6px 14px color-mix(in srgb,var(--sw-accent) 40%,transparent);}
-  .sw-brand__name{font-family:var(--sw-font-display);font-weight:700;font-size:1.1rem;}
-  .sw-nav{display:flex;gap:4px;padding:5px;background:color-mix(in srgb,#fff 55%,transparent);backdrop-filter:blur(10px);border:1px solid color-mix(in srgb,var(--sw-accent) 16%,transparent);border-radius:999px;}
-  .sw-nav__item{font:inherit;font-size:.82rem;color:var(--sw-ink-soft);border:0;background:transparent;cursor:pointer;padding:7px 14px;border-radius:999px;transition:color .25s,background .25s;}
-  .sw-nav__item:hover{color:var(--sw-ink);} .sw-nav__item.is-active{color:#fff;background:var(--sw-accent);}
-  .sw-topcta{text-decoration:none;font-weight:600;font-size:.9rem;color:#fff;background:var(--sw-ink);padding:10px 20px;border-radius:999px;white-space:nowrap;}
+  .sw-brand__mark{width:22px;height:26px;border-radius:6px 6px 9px 9px;background:linear-gradient(160deg,var(--sw-accent),color-mix(in srgb,var(--sw-accent) 60%,#000));box-shadow:0 6px 14px color-mix(in srgb,var(--sw-accent) 40%,transparent);}
+  .sw-brand__name{font-family:var(--sw-font-display);font-weight:700;font-size:1.05rem;}
+  .sw-nav{display:none;}
+  .sw-topcta{text-decoration:none;font-weight:600;font-size:.82rem;color:#fff;background:var(--sw-ink);padding:8px 16px;border-radius:999px;white-space:nowrap;}
+
   .sw-stage{position:fixed;inset:0;z-index:10;pointer-events:none;}
   .sw-scene{position:absolute;inset:0;opacity:0;overflow:hidden;will-change:opacity;}
-  .sw-scene__video,.sw-scene__still{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center 42%;}
+  .sw-scene__video,.sw-scene__still{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center 38%;}
   .sw-scene__still{will-change:transform;} .sw-scene.has-clip .sw-scene__still{opacity:0;} .sw-scene__video{z-index:1;}
+  @media (min-aspect-ratio: 4/5) {
+    .sw-scene__video,.sw-scene__still{object-fit:contain;object-position:center 30%;}
+  }
+
+  /* Copy layer: anchored at bottom with soft upward gradient */
   .sw-copylayer{position:fixed;inset:0;z-index:20;pointer-events:none;}
-  .sw-copylayer::before{content:"";position:absolute;inset:0;width:min(58vw,780px);background:linear-gradient(90deg,var(--sw-bg) 0%,color-mix(in srgb,var(--sw-bg) 82%,transparent) 34%,color-mix(in srgb,var(--sw-bg) 40%,transparent) 62%,transparent 100%);}
-  .sw-copy{position:absolute;left:clamp(18px,5vw,64px);top:50%;transform:translateY(-50%);width:min(42vw,460px);opacity:0;will-change:opacity,transform;}
-  .sw-copy__num{font-family:ui-monospace,Menlo,monospace;font-size:.74rem;letter-spacing:.12em;color:var(--sw-ink-soft);}
-  .sw-copy__eyebrow{display:block;margin-top:18px;font-family:var(--sw-font-display);font-weight:700;font-size:.8rem;letter-spacing:.16em;text-transform:uppercase;color:var(--sw-accent);}
-  .sw-copy__title{font-family:var(--sw-font-display);font-weight:700;color:var(--sw-ink);font-size:clamp(2rem,4.4vw,3.5rem);line-height:1.03;margin:12px 0 0;letter-spacing:-.01em;text-shadow:0 2px 20px color-mix(in srgb,var(--sw-bg) 70%,transparent);}
-  .sw-copy__body{margin-top:18px;font-size:clamp(1rem,1.25vw,1.14rem);line-height:1.55;color:color-mix(in srgb,var(--sw-ink) 78%,var(--sw-ink-soft));max-width:40ch;text-shadow:0 1px 12px color-mix(in srgb,var(--sw-bg) 90%,transparent);}
-  .sw-copy__tags{list-style:none;display:flex;flex-wrap:wrap;gap:8px;margin:24px 0 0;padding:0;}
-  .sw-copy__tags li{font-size:.82rem;font-weight:600;color:color-mix(in srgb,var(--sw-accent) 70%,#000);padding:7px 14px;border-radius:999px;background:color-mix(in srgb,var(--sw-accent) 14%,#fff);border:1px solid color-mix(in srgb,var(--sw-accent) 30%,transparent);}
-  .sw-copy__cta{display:flex;flex-wrap:wrap;gap:12px;margin-top:28px;pointer-events:auto;}
-  .sw-btn{text-decoration:none;font-weight:600;font-size:.95rem;padding:13px 24px;border-radius:999px;transition:transform .2s;}
+  .sw-copylayer::before{content:"";position:absolute;left:0;right:0;bottom:0;width:100%;height:60%;
+    background:linear-gradient(0deg,var(--sw-bg) 25%,color-mix(in srgb,var(--sw-bg) 85%,transparent) 56%,transparent 100%);}
+  .sw-copy{position:absolute;left:50%;bottom:calc(clamp(48px,10vh,92px) + env(safe-area-inset-bottom));top:auto;
+    transform:translateX(-50%);width:min(calc(100vw - 36px),500px);max-width:500px;
+    text-align:center;display:flex;flex-direction:column;align-items:center;opacity:0;will-change:opacity,transform;}
+  .sw-copy__num{font-family:ui-monospace,Menlo,monospace;font-size:.72rem;letter-spacing:.12em;color:var(--sw-ink-soft);}
+  .sw-copy__eyebrow{display:block;margin-top:8px;font-family:var(--sw-font-display);font-weight:700;font-size:.8rem;letter-spacing:.16em;text-transform:uppercase;color:var(--sw-accent);}
+  .sw-copy__title{font-family:var(--sw-font-display);font-weight:700;color:var(--sw-ink);font-size:clamp(1.75rem,5.5vw,2.35rem);line-height:1.06;margin:8px 0 0;letter-spacing:-.01em;text-shadow:0 2px 20px color-mix(in srgb,var(--sw-bg) 70%,transparent);}
+  .sw-copy__body{margin-top:10px;font-size:clamp(.92rem,2.8vw,1.05rem);line-height:1.5;color:color-mix(in srgb,var(--sw-ink) 78%,var(--sw-ink-soft));max-width:44ch;text-shadow:0 1px 12px color-mix(in srgb,var(--sw-bg) 90%,transparent);}
+  .sw-copy__tags{list-style:none;display:flex;flex-wrap:wrap;justify-content:center;gap:7px;margin:14px 0 0;padding:0;}
+  .sw-copy__tags li{font-size:.78rem;font-weight:600;color:color-mix(in srgb,var(--sw-accent) 70%,#000);padding:5px 12px;border-radius:999px;background:color-mix(in srgb,var(--sw-accent) 14%,#fff);border:1px solid color-mix(in srgb,var(--sw-accent) 30%,transparent);}
+  .sw-copy__cta{display:flex;flex-wrap:wrap;justify-content:center;gap:10px;margin-top:16px;pointer-events:auto;}
+  .sw-btn{text-decoration:none;font-weight:600;font-size:.9rem;padding:12px 22px;border-radius:999px;transition:transform .2s;}
   .sw-btn--primary{color:#fff;background:var(--sw-ink);} .sw-btn--primary:hover{transform:translateY(-2px);}
   .sw-btn--ghost{color:var(--sw-ink);border:1.5px solid color-mix(in srgb,var(--sw-ink) 25%,transparent);} .sw-btn--ghost:hover{transform:translateY(-2px);}
-  .sw-route{position:fixed;right:clamp(14px,2.4vw,30px);top:50%;z-index:40;transform:translateY(-50%);display:flex;flex-direction:column;gap:22px;padding:18px 10px;}
-  .sw-route::before{content:"";position:absolute;left:50%;top:22px;bottom:22px;width:2px;transform:translateX(-50%);background:var(--sw-accent);opacity:.28;}
-  .sw-route__dot{position:relative;border:0;background:transparent;cursor:pointer;width:14px;height:14px;display:grid;place-items:center;}
+
+  /* Route dots: compact mobile style */
+  .sw-route{position:fixed;right:max(8px,calc(50vw - 272px));top:50%;z-index:40;transform:translateY(-50%);display:flex;flex-direction:column;gap:16px;padding:14px 4px;}
+  .sw-route::before{content:"";position:absolute;left:50%;top:18px;bottom:18px;width:2px;transform:translateX(-50%);background:var(--sw-accent);opacity:.28;}
+  .sw-route__dot{position:relative;border:0;background:transparent;cursor:pointer;width:28px;height:28px;display:grid;place-items:center;}
   .sw-route__dot i{width:9px;height:9px;border-radius:50%;background:color-mix(in srgb,var(--sw-accent) 40%,transparent);transition:transform .3s,background .3s,box-shadow .3s;}
   .sw-route__dot:hover i{transform:scale(1.25);background:var(--sw-accent);}
   .sw-route__dot.is-active i{background:var(--sw-accent);transform:scale(1.4);box-shadow:0 0 0 5px color-mix(in srgb,var(--sw-accent) 22%,transparent);}
-  .sw-route__label{position:absolute;right:24px;top:50%;transform:translateY(-50%) translateX(6px);white-space:nowrap;font-size:.78rem;font-weight:600;color:var(--sw-ink);background:color-mix(in srgb,#fff 85%,transparent);backdrop-filter:blur(6px);padding:5px 11px;border-radius:999px;opacity:0;pointer-events:none;transition:opacity .25s,transform .25s;border:1px solid color-mix(in srgb,var(--sw-accent) 14%,transparent);}
-  .sw-route__dot:hover .sw-route__label,.sw-route__dot.is-active .sw-route__label{opacity:1;transform:translateY(-50%) translateX(0);}
-  .sw-hint{position:fixed;left:50%;bottom:26px;z-index:30;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:10px;font-size:.76rem;letter-spacing:.14em;text-transform:uppercase;color:var(--sw-ink-soft);transition:opacity .3s;}
-  .sw-hint i{width:22px;height:34px;border-radius:12px;border:2px solid color-mix(in srgb,var(--sw-ink) 28%,transparent);position:relative;}
-  .sw-hint i::after{content:"";position:absolute;left:50%;top:7px;width:4px;height:7px;border-radius:2px;background:var(--sw-accent);transform:translateX(-50%);animation:sw-wheel 1.7s ease-in-out infinite;}
-  @keyframes sw-wheel{0%{opacity:0;top:6px}40%{opacity:1}100%{opacity:0;top:17px}}
+  .sw-route__label{display:none;}
+
+  .sw-hint{position:fixed;left:50%;bottom:calc(16px + env(safe-area-inset-bottom));z-index:30;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:8px;font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--sw-ink-soft);transition:opacity .3s;}
+  .sw-hint i{width:20px;height:32px;border-radius:12px;border:2px solid color-mix(in srgb,var(--sw-ink) 28%,transparent);position:relative;}
+  .sw-hint i::after{content:"";position:absolute;left:50%;top:6px;width:4px;height:6px;border-radius:2px;background:var(--sw-accent);transform:translateX(-50%);animation:sw-wheel 1.7s ease-in-out infinite;}
+  @keyframes sw-wheel{0%{opacity:0;top:5px}40%{opacity:1}100%{opacity:0;top:16px}}
   .sw-track{position:relative;z-index:1;width:100%;pointer-events:none;}
-  @media (max-width:860px){
-    .sw-nav{display:none;}
-    .sw-copylayer::before{width:100%;height:60%;top:auto;bottom:0;background:linear-gradient(0deg,var(--sw-bg) 8%,color-mix(in srgb,var(--sw-bg) 70%,transparent) 46%,transparent 100%);}
-    /* Anchor copy to the bottom, clear of the home indicator / collapsing URL bar.
-       dvh + env() are progressive: browsers that lack them keep the vh fallback line. */
-    .sw-copy{left:clamp(18px,5vw,64px);right:clamp(18px,5vw,64px);top:auto;bottom:clamp(64px,14vh,120px);transform:none;width:auto;max-width:560px;}
-    .sw-copy{bottom:calc(clamp(56px,12dvh,110px) + env(safe-area-inset-bottom));}
-    .sw-copy__title{font-size:clamp(1.9rem,7.5vw,2.7rem);}
-    .sw-copy__body{max-width:none;font-size:clamp(.98rem,3.6vw,1.1rem);} .sw-scene__video,.sw-scene__still{object-position:center 46%;}
-    .sw-hint{bottom:calc(20px + env(safe-area-inset-bottom));}
-    .sw-route{gap:16px;right:6px;} .sw-route__label{display:none;}
-  }
-  /* Portrait phones crop a 16:9 clip hard; keep the framing centred so the focal
-     subject (which the camera dives toward) stays in view. */
-  @media (max-width:860px) and (orientation:portrait){
-    .sw-scene__video,.sw-scene__still{object-position:center 44%;}
-  }
-  /* Touch: give the route dots a finger-sized hit area without growing the visible dot. */
-  @media (hover:none) and (pointer:coarse){
-    .sw-route{padding:14px 6px;}
-    .sw-route__dot{width:28px;height:28px;}
-    .sw-btn{padding:15px 26px;}
-  }
-  @media (prefers-reduced-motion:reduce){ .sw-hint i::after{animation:none;} .sw-pt{display:none;} }
+
+  .sw-load{position:fixed;left:50%;top:calc(clamp(14px,2.4vw,26px) + 54px);z-index:55;transform:translateX(-50%);display:flex;align-items:center;gap:9px;
+    font:600 .74rem/1 var(--sw-font-body);letter-spacing:.04em;color:var(--sw-ink-soft);white-space:nowrap;
+    padding:8px 14px 8px 10px;border-radius:999px;border:1px solid color-mix(in srgb,var(--sw-accent) 22%,transparent);
+    background:color-mix(in srgb,var(--sw-bg) 82%,transparent);backdrop-filter:blur(8px);cursor:default;transition:opacity .6s,transform .6s;}
+  .sw-load i{--p:0%;width:16px;height:16px;border-radius:50%;flex:none;background:conic-gradient(var(--sw-accent) var(--p),color-mix(in srgb,var(--sw-accent) 18%,transparent) 0);
+    -webkit-mask:radial-gradient(circle,transparent 4.5px,#000 5px);mask:radial-gradient(circle,transparent 4.5px,#000 5px);}
+  .sw-load.is-optin{cursor:pointer;color:var(--sw-ink);} .sw-load.is-optin i{background:var(--sw-accent);-webkit-mask:none;mask:none;width:8px;height:8px;}
+  .sw-load.is-done{opacity:0;transform:translateX(-50%) translateY(-6px);pointer-events:none;}
+
+  @media (prefers-reduced-motion:reduce){ .sw-hint i::after{animation:none;} }
   `;
   // Wrap in a cascade layer so the page's own theme tokens (unlayered
   // :root / .sw-root { --sw-bg / --sw-ink / --sw-accent … }) always win over

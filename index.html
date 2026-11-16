@@ -43,8 +43,8 @@
       sections: [
         {
           id: 'welcome', label: 'Welcome',
-          still: 'assets/img/still_1_welcome.jpg', stillMobile: 'assets/img/still_1_welcome-m.jpg',
-          clip: 'assets/vid/dive_1_welcome.mp4',   clipMobile: 'assets/vid/dive_1_welcome-m.mp4',
+          still: 'assets/img/still_1_welcome-m.jpg',
+          clip: 'assets/vid/dive_1_welcome-m.mp4',
           accent: '#C9A24B', scroll: 1.6, linger: 0.4,
           eyebrow: 'Together with our families',
           title: 'Jatin & Tanvi are getting married.',
@@ -53,8 +53,8 @@
         },
         {
           id: 'haldi', label: 'Haldi',
-          still: 'assets/img/still_2_haldi.jpg', stillMobile: 'assets/img/still_2_haldi-m.jpg',
-          clip: 'assets/vid/dive_2_haldi.mp4',   clipMobile: 'assets/vid/dive_2_haldi-m.mp4',
+          still: 'assets/img/still_2_haldi-m.jpg',
+          clip: 'assets/vid/dive_2_haldi-m.mp4',
           accent: '#F2A61D',
           eyebrow: 'Friday, 4th December · 12:00 PM',
           title: 'Haldi, in a shower of marigolds.',
@@ -63,8 +63,8 @@
         },
         {
           id: 'mehendi', label: 'Mehendi',
-          still: 'assets/img/still_3_mehendi.jpg', stillMobile: 'assets/img/still_3_mehendi-m.jpg',
-          clip: 'assets/vid/dive_3_mehendi.mp4',   clipMobile: 'assets/vid/dive_3_mehendi-m.mp4',
+          still: 'assets/img/still_3_mehendi-m.jpg',
+          clip: 'assets/vid/dive_3_mehendi-m.mp4',
           accent: '#5E7F4A',
           eyebrow: 'Friday, 4th December · 4:00 PM',
           title: 'Mehendi, stories in every swirl.',
@@ -73,8 +73,8 @@
         },
         {
           id: 'djnight', label: 'DJ Night',
-          still: 'assets/img/still_4_djnight.jpg', stillMobile: 'assets/img/still_4_djnight-m.jpg',
-          clip: 'assets/vid/dive_4_djnight.mp4',   clipMobile: 'assets/vid/dive_4_djnight-m.mp4',
+          still: 'assets/img/still_4_djnight-m.jpg',
+          clip: 'assets/vid/dive_4_djnight-m.mp4',
           accent: '#E58FA3',
           eyebrow: 'Friday, 4th December · 6:00 PM',
           title: 'DJ Night. Bring your best moves.',
@@ -83,8 +83,8 @@
         },
         {
           id: 'baraat', label: 'Baraat',
-          still: 'assets/img/still_5_baraat.jpg', stillMobile: 'assets/img/still_5_baraat-m.jpg',
-          clip: 'assets/vid/dive_5_baraat.mp4',   clipMobile: 'assets/vid/dive_5_baraat-m.mp4',
+          still: 'assets/img/still_5_baraat-m.jpg',
+          clip: 'assets/vid/dive_5_baraat-m.mp4',
           accent: '#C9A24B',
           eyebrow: 'Saturday, 5th December · 7:00 PM',
           title: 'The baraat arrives.',
@@ -93,8 +93,8 @@
         },
         {
           id: 'wedding', label: 'The Wedding',
-          still: 'assets/img/still_6_wedding.jpg', stillMobile: 'assets/img/still_6_wedding-m.jpg',
-          clip: 'assets/vid/dive_6_wedding.mp4',   clipMobile: 'assets/vid/dive_6_wedding-m.mp4',
+          still: 'assets/img/still_6_wedding-m.jpg',
+          clip: 'assets/vid/dive_6_wedding-m.mp4',
           accent: '#7A1F2B', scroll: 1.8, linger: 0.5,
           eyebrow: 'Saturday, 5th December · 9:00 PM',
           title: 'Two families, one mandap.',
@@ -104,11 +104,13 @@
                  secondary: { label: 'Haldi · Mehendi · DJ venue', href: MAP_HOME } },
         },
       ],
-      // Connector clips are not rendered yet: null = the engine crossfades scene to scene.
-      // When they exist, list assets/vid/conn_1.mp4 … conn_5.mp4 here and
-      // assets/vid/conn_1-m.mp4 … conn_5-m.mp4 in connectorsMobile.
-      connectors: [null, null, null, null, null],
-      connectorsMobile: ['assets/vid/conn_1-m.mp4', 'assets/vid/conn_2-m.mp4', 'assets/vid/conn_3-m.mp4', 'assets/vid/conn_4-m.mp4', 'assets/vid/conn_5-m.mp4'],
+      connectors: [
+        'assets/vid/conn_1-m.mp4',
+        'assets/vid/conn_2-m.mp4',
+        'assets/vid/conn_3-m.mp4',
+        'assets/vid/conn_4-m.mp4',
+        'assets/vid/conn_5-m.mp4'
+      ],
     });
   </script>
 </body>
